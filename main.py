@@ -26,3 +26,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+#https://chatgpt.com/share/69f71d18-fde4-83ea-889a-b5ba4889d759
