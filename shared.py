@@ -2,6 +2,9 @@ from enum import Enum
 from dataclasses import dataclass
 import time
 
+MODELPATH="/home/deni/Music/Desktop/robot/models/litter-detection-linux-aarch64-v3-impulse-#1.eim"
+
+
 class RobotState(Enum):
     IDLE = 0
     SEARCHING = 1
@@ -13,9 +16,10 @@ class RobotState(Enum):
 class Detection:
     detected: bool
     confidence: float
-    x: float
-    y: float
-    timestamp: float = time.time()
+    x: float   # normalized (nx)
+    y: float   # normalized (ny)
+    distance: float = 0.0
+    timestamp: float = 0.0
 
 @dataclass
 class MotionCommand:

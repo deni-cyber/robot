@@ -1,148 +1,65 @@
-from shared import RobotState, MotionCommand, Status
-import time
+#THIS FILE IS THE BRAIN OF THE ROBOT, IT PROCESSES VISION DATA AND DECIDES WHAT TO DO.
+# IT RECEIVES DATA FROM THE VISION MODULE, DECIDES WHETHER TO LOCK ONTO A TARGET, AND THEN SENDS COMMANDS TO THE ACTUATOR MODULE TO PICK UP THE TARGET.
+# IT ALSO SENDS STATUS UPDATES TO THE WEB MODULE TO DISPLAY ON THE DASHBOARD.
+
+from shared import RobotState, ArmCommand, Status
 
 def brain_process(vision_queue, motion_queue, arm_queue, status_queue, control_queue):
+    state = RobotState.IDLE
 
-    state = RobotState.SEARCHING
-
-    target_locked = False
+    locked_target = None
     stable_count = 0
-
-    CENTER_TOL = 0.08
-    STABLE_FRAMES = 5
-
-    last_detection = None
+    STABLE_N = 3
     arm_busy = False
-    bin_full = False
 
     while True:
+        if vision_queue.empty():
+            continue
 
-        # ================= CONTROL INPUT =================
-        if not control_queue.empty():
-            cmd = control_queue.get()
+        detec_obj = vision_queue.get()
 
-            if cmd == "STOP":
-                state = RobotState.IDLE
-                motion_queue.put(MotionCommand(0, 0))
-
-        # ================= STATUS FROM ARDUINO =================
-        if not status_queue.empty():
-            msg = status_queue.get()
-
-            if msg == "ARM_START":
-                arm_busy = True
-
-            elif msg == "ARM_DONE":
-                arm_busy = False
-                state = RobotState.SEARCHING
-
-            elif msg == "BIN_FULL":
-                bin_full = True
-                state = RobotState.IDLE
-                motion_queue.put(MotionCommand(0, 0))
-
-        # ================= VISION =================
-        if not vision_queue.empty():
-            detection = vision_queue.get()
-            last_detection = detection
-
-            if not detection.detected:
-                stable_count = 0
-                target_locked = False
-                continue
-
-            # -------- alignment check --------
-            centered = abs(detection.x - 0.5) < CENTER_TOL
-
-            if centered:
-                stable_count += 1
+        # ---------------- LOCK LOGIC ----------------
+        if detec_obj.detec_objected:
+            if locked_target is None:
+                locked_target = detec_obj
+                stable_count = 1
             else:
-                stable_count = 0
+                # Check if it's roughly the same target
+                if abs(detec_obj.x - locked_target.x) < 0.05 and abs(detec_obj.y - locked_target.y) < 0.05:
+                    stable_count += 1
+                    locked_target = detec_obj
+                    print(f"[LOCK] stable_count={stable_count}, x={detec_obj.x:.2f}, y={detec_obj.y:.2f}")
+                else:
+                    # New target → reset lock
+                    locked_target = detec_obj
+                    stable_count = 1
+        else:
+            locked_target = None
+            stable_count = 0
+            arm_busy = False
+            state = RobotState.IDLE
 
-            if stable_count >= STABLE_FRAMES:
-                target_locked = True
+        # ---------------- STATE LOGIC ----------------
+        if locked_target is not None:
+            state = RobotState.TARGET_LOCKED
 
-        # ================= STATE MACHINE =================
+            if stable_count >= STABLE_N and not arm_busy:
+                state = RobotState.PICKING
 
-        if state == RobotState.IDLE:
-            motion_queue.put(MotionCommand(0, 0))
+                # Convert to real coordinates (simple mapping)
+                X = (locked_target.x - 0.5) * 20.0
+                Y = locked_target.distance * 30.0
 
-        # ---------------- SEARCHING ----------------
-        elif state == RobotState.SEARCHING:
+                if not arm_queue.full():
+                    arm_queue.put(ArmCommand("PICK", X, Y))
+                    print(f"[BRAIN] PICK sent → X:{X:.2f}, Y:{Y:.2f}")
+                    arm_busy = True
 
-            if last_detection and last_detection.detected:
-
-                error = last_detection.x - 0.5
-                angular = error * 1.5
-                linear = 0.0
-
-                motion_queue.put(MotionCommand(linear, angular))
-
-                state = RobotState.TARGET_LOCKED
-
-        # ---------------- TARGET LOCK ----------------
-        elif state == RobotState.TARGET_LOCKED:
-
-            if last_detection is None:
-                state = RobotState.SEARCHING
-                continue
-
-            error = last_detection.x - 0.5
-
-            motion_queue.put(MotionCommand(0.0, error * 1.5))
-
-            # send target to Arduino (only once when stable)
-            if target_locked and not arm_busy:
-
-                x = int(last_detection.x * 96)
-                y = int(last_detection.y * 96)
-
-                arm_queue.put(f"TARGET:{x},{y}")
-
-                state = RobotState.APPROACHING
-
-        # ---------------- APPROACHING ----------------
-        elif state == RobotState.APPROACHING:
-
-            if last_detection is None:
-                state = RobotState.SEARCHING
-                continue
-
-            error = last_detection.x - 0.5
-            angular = error * 1.2
-
-            # move forward until close
-            linear = 0.25 if last_detection.distance < 0.15 else 0.0
-
-            motion_queue.put(MotionCommand(linear, angular))
-
-            # trigger pick when close + stable + not busy
-            if (last_detection.distance < 0.15 and
-                target_locked and
-                not arm_busy):
-
-                arm_queue.put("PICK")
-                arm_busy = True
-
-                state = RobotState.WAITING_PICK
-
-        # ---------------- WAIT PICK ----------------
-        elif state == RobotState.WAITING_PICK:
-
-            motion_queue.put(MotionCommand(0, 0))
-
-            # wait for Arduino confirmation
-            if not arm_busy:
-                state = RobotState.SEARCHING
-
-        # ================= STATUS OUTPUT =================
-        if last_detection:
-            if not status_queue.full():
-                status_queue.put(Status(
-                    state.name,
-                    last_detection.detected,
-                    last_detection.x,
-                    last_detection.y
-                ))
-
-        time.sleep(0.02)
+        # ---------------- STATUS ----------------
+        if not status_queue.full():
+            status_queue.put(Status(
+                state.name,
+                detec_obj.detec_objected,
+                detec_obj.x,
+                detec_obj.y
+            ))
