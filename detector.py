@@ -12,6 +12,7 @@ class LitterDetector:
         if not self.cap.isOpened():
             raise Exception("Camera not accessible")
 
+        # Keeping resolution low for speed on aarch64
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
 
@@ -38,31 +39,39 @@ class LitterDetector:
         return x_s, y_s
 
     def detect(self, threshold=0.5):
+        """
+        Returns: (best_detection_dict, original_frame)
+        """
         frame = self._get_frame()
         if frame is None:
-            return None
+            return None, None
 
+        # Edge Impulse models usually want a specific size (96x96 here)
         model_input = cv2.resize(frame, (96, 96))
         features, _ = self.runner.get_features_from_image(model_input)
         result = self.runner.classify(features)
 
         boxes = result.get("result", {}).get("bounding_boxes", [])
-        if not boxes:
-            self.prev_x = None
-            self.prev_y = None
-            return None
-
+        
         h, w, _ = frame.shape
         scale_x = w / 96
         scale_y = h / 96
 
         detections = []
 
+        if not boxes:
+            self.prev_x = None
+            self.prev_y = None
+            # IMPORTANT: Still return the frame so the web stream stays alive
+            return None, frame
+
         for bb in boxes:
             if bb["value"] >= threshold:
+                # Calculate center pixels
                 cx = (bb["x"] + bb["width"] / 2) * scale_x
                 cy = (bb["y"] + bb["height"] / 2) * scale_y
 
+                # Normalize (0.0 to 1.0)
                 nx = cx / w
                 ny = cy / h
 
@@ -75,13 +84,19 @@ class LitterDetector:
                     "confidence": bb["value"],
                     "nx": nx,
                     "ny": ny,
-                    "distance": 1.0 / (real_height + 1e-5)
+                    "distance": 1.0 / (real_height + 1e-5),
+                    # We include bounding box pixels for easier drawing in vision.py
+                    "box": [int(bb["x"] * scale_x), int(bb["y"] * scale_y), 
+                            int(bb["width"] * scale_x), int(bb["height"] * scale_y)]
                 })
 
         if not detections:
-            return None
+            return None, frame
 
-        return max(detections, key=lambda d: d["confidence"])
+        # Find the detection with the highest confidence
+        best_target = max(detections, key=lambda d: d["confidence"])
+        
+        return best_target, frame
 
     def release(self):
         self.cap.release()
